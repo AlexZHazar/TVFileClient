@@ -197,6 +197,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadFileList(serverUrl: String) {
+        binding.refreshLayout.isRefreshing = true
+
         val request = Request.Builder()
             .url(serverUrl)
             .get()
@@ -206,19 +208,24 @@ class MainActivity : AppCompatActivity() {
             override fun onFailure(call: Call, e: IOException) {
                 runOnUiThread {
                     binding.refreshLayout.isRefreshing = false
-                    showError("Ошибка загрузки списка файлов")
+                    Log.e("FileList", "Failed to load list", e)
                 }
             }
 
             override fun onResponse(call: Call, response: Response) {
+                // Читаем тело ответа в фоновом потоке!
+                val responseBody = response.body?.string() ?: ""
+
                 runOnUiThread {
                     binding.refreshLayout.isRefreshing = false
-
-                    if (response.isSuccessful) {
-                        val html = response.body?.string() ?: ""
-                        parseFileListFromHtml(html)
-                    } else {
-                        showError("Ошибка загрузки: ${response.code}")
+                    try {
+                        if (response.isSuccessful) {
+                            parseFileListFromHtml(responseBody)
+                        } else {
+                            Log.e("FileList", "Error response: ${response.code}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("FileList", "Error parsing response", e)
                     }
                 }
             }
@@ -348,10 +355,16 @@ class MainActivity : AppCompatActivity() {
                     if (response.isSuccessful) {
                         showSuccess("Файл успешно загружен")
 
-                        // Даем серверу время на освобождение ресурсов
-                        android.os.Handler(mainLooper).postDelayed({
-                            loadFileList(serverUrl)
-                        }, 2000) // Задержка 2 секунды
+//                        // Даем серверу время на освобождение ресурсов
+//                        android.os.Handler(mainLooper).postDelayed({
+//                            loadFileList(serverUrl)
+//                        }, 2000) // Задержка 2 секунды
+
+                        // Просто показываем сообщение об успехе
+                        Snackbar.make(binding.root, "Файл загружен. Обновите список вручную", Snackbar.LENGTH_LONG)
+                            .setBackgroundTint(ContextCompat.getColor(this, android.R.color.holo_green_dark))
+                            .setTextColor(ContextCompat.getColor(this, android.R.color.white))
+                            .show()
 
                     } else {
                         showError("Ошибка сервера: ${response.code}")
@@ -453,13 +466,16 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onResponse(call: Call, response: Response) {
+                // Читаем ответ здесь, в фоне
+                val responseBody = response.body?.string()
+
                 runOnUiThread {
                     showLoading(false)
                     if (response.isSuccessful) {
                         showSuccess("Файл удален")
                         loadFileList(serverUrl)
                     } else {
-                        showError("Ошибка удаления")
+                        showError("Ошибка удаления: ${response.code}")
                     }
                 }
             }
