@@ -126,8 +126,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun scanQRCode() {
+        // Проверяем разрешение на камеру
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
             != PackageManager.PERMISSION_GRANTED) {
+
+            // Запрашиваем разрешение
             ActivityCompat.requestPermissions(
                 this,
                 arrayOf(Manifest.permission.CAMERA),
@@ -136,27 +139,40 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Запускаем сканер
         val integrator = IntentIntegrator(this)
         integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-        integrator.setPrompt("Сканируйте QR-код с приставки")
-        integrator.setCameraId(0)
-        integrator.setBeepEnabled(false)
+        integrator.setPrompt("Наведите камеру на QR-код с приставки")
+        integrator.setCameraId(0)  // Используем основную камеру
+        integrator.setBeepEnabled(true)  // Звуковой сигнал при сканировании
         integrator.setBarcodeImageEnabled(false)
+        integrator.setOrientationLocked(false)  // Разрешаем поворот экрана
         integrator.initiateScan()
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
 
+        // Обработка результата сканирования QR-кода
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (result != null) {
             if (result.contents != null) {
                 val qrContent = result.contents
+                // Показываем что нашли
+                Toast.makeText(this, "QR-код считан: $qrContent", Toast.LENGTH_SHORT).show()
+
+                // Вставляем в поле ввода
                 binding.serverUrlInput.setText(qrContent)
+
+                // Автоматически подключаемся
                 connectToServer(qrContent)
+            } else {
+                showError("Сканирование отменено")
             }
+            return
         }
 
+        // Обработка выбора файла
         if (requestCode == PICK_FILE_REQUEST && resultCode == RESULT_OK) {
             data?.data?.let { uri ->
                 uploadFile(uri)
@@ -533,9 +549,21 @@ class MainActivity : AppCompatActivity() {
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() &&
                 grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
-                showSuccess("Разрешения получены")
+
+                // Проверяем, какое разрешение было запрошено
+                if (permissions.contains(Manifest.permission.CAMERA)) {
+                    // Если дали разрешение на камеру - запускаем сканер
+                    scanQRCode()
+                } else {
+                    showSuccess("Разрешения получены")
+                }
             } else {
-                showError("Нужны разрешения для работы с файлами")
+                // Если отказались от камеры, показываем предупреждение
+                if (permissions.contains(Manifest.permission.CAMERA)) {
+                    showError("Без разрешения на камеру сканер не работает")
+                } else {
+                    showError("Нужны разрешения для работы с файлами")
+                }
             }
         }
     }

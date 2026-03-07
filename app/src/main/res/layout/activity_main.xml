@@ -57,7 +57,8 @@
                 android:layout_height="wrap_content"
                 android:backgroundTint="@color/primaryColor"
                 android:text="📷"
-                android:textSize="24sp" />
+                android:textSize="24sp"
+                android:contentDescription="Сканировать QR-код" />
 
         </LinearLayout>
 
