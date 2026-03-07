@@ -24,9 +24,13 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.asRequestBody
-import java.io.File
+import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import okio.source
+import okio.buffer
+import java.io.InputStream
 import java.io.IOException
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
@@ -70,8 +74,9 @@ class MainActivity : AppCompatActivity() {
 
         client = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+//            .connectTimeout(2, TimeUnit.MINUTES)
+            .writeTimeout(10, TimeUnit.MINUTES) // Увеличиваем для больших файлов
+            .readTimeout(10, TimeUnit.MINUTES)
             .addInterceptor(logging)
             .build()
     }
@@ -309,58 +314,100 @@ class MainActivity : AppCompatActivity() {
         }
 
         showLoading(true)
+        showProgressBar(true)
 
-        mainScope.launch {
+        mainScope.launch(Dispatchers.IO) {
+            var inputStream: InputStream? = null
             try {
-                val inputStream = contentResolver.openInputStream(uri)
+                // Получаем размер файла до открытия потока
+                val fileSize = getFileSize(uri)
                 val fileName = getFileName(uri)
-                val tempFile = File(cacheDir, "upload_${System.currentTimeMillis()}")
 
-                inputStream?.use { input ->
-                    tempFile.outputStream().use { output ->
-                        input.copyTo(output)
+                if (fileSize == 0L) {
+                    withContext(Dispatchers.Main) {
+                        showError("Не удалось определить размер файла")
+                        showLoading(false)
+                        showProgressBar(false)
+                    }
+                    return@launch
+                }
+
+                // Создаем кастомный RequestBody, который сам управляет потоком
+                val requestBody = object : RequestBody() {
+                    override fun contentType(): MediaType? =
+                        "application/octet-stream".toMediaTypeOrNull()
+
+                    override fun contentLength(): Long = fileSize
+
+                    override fun writeTo(sink: BufferedSink) {
+                        // Открываем поток ТОЛЬКО здесь и закрываем его после использования
+                        contentResolver.openInputStream(uri)?.use { stream ->
+                            val buffer = ByteArray(8192) // 8KB буфер
+                            var bytesRead: Int
+                            var total = 0L
+
+                            while (stream.read(buffer).also { bytesRead = it } != -1) {
+                                sink.write(buffer, 0, bytesRead)
+                                sink.emit()
+                                total += bytesRead
+
+                                val percent = (total * 100 / fileSize).toInt()
+                                val currentTotal = total
+
+                                // Обновляем прогресс
+                                runOnUiThread {
+                                    updateProgress(percent, currentTotal, fileSize)
+                                }
+                            }
+                        } ?: throw IOException("Не удалось открыть файл")
                     }
                 }
 
-                val requestBody = MultipartBody.Builder()
+                val multipartBody = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
-                    .addFormDataPart("postData", fileName,
-                        tempFile.asRequestBody("application/octet-stream".toMediaTypeOrNull()))
+                    .addFormDataPart("postData", fileName, requestBody)
                     .addFormDataPart("filename", fileName)
                     .build()
 
                 val request = Request.Builder()
                     .url(serverUrl)
-                    .post(requestBody)
+                    .post(multipartBody)
                     .build()
 
                 client.newCall(request).enqueue(object : Callback {
                     override fun onFailure(call: Call, e: IOException) {
-                        mainScope.launch {
+                        runOnUiThread {
                             showLoading(false)
-                            tempFile.delete()
+                            showProgressBar(false)
                             showError("Ошибка загрузки: ${e.message}")
                         }
+                        e.printStackTrace()
                     }
 
                     override fun onResponse(call: Call, response: Response) {
-                        mainScope.launch {
+                        runOnUiThread {
                             showLoading(false)
-                            tempFile.delete()
+                            showProgressBar(false)
 
-                            if (response.isSuccessful) {
-                                showSuccess("Файл успешно загружен")
-                                loadFileList(serverUrl)
-                            } else {
-                                showError("Ошибка загрузки: ${response.code}")
+                            response.use {
+                                if (it.isSuccessful) {
+                                    showSuccess("Файл успешно загружен")
+                                    loadFileList(serverUrl)
+                                } else {
+                                    showError("Ошибка загрузки: ${it.code}")
+                                }
                             }
                         }
                     }
                 })
 
             } catch (e: Exception) {
-                showLoading(false)
-                showError("Ошибка: ${e.message}")
+                e.printStackTrace()
+                runOnUiThread {
+                    showLoading(false)
+                    showProgressBar(false)
+                    showError("Ошибка: ${e.message}")
+                }
             }
         }
     }
@@ -381,6 +428,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         return fileName
+    }
+
+    private fun getFileSize(uri: Uri): Long {
+        return try {
+            val cursor = contentResolver.query(uri, null, null, null, null)
+            cursor?.use {
+                val sizeIndex = it.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (sizeIndex >= 0 && it.moveToFirst()) {
+                    return it.getLong(sizeIndex)
+                }
+            }
+            0
+        } catch (e: Exception) {
+            0
+        }
     }
 
     private fun showFileOptionsDialog(file: RemoteFile) {
@@ -509,6 +571,32 @@ class MainActivity : AppCompatActivity() {
             } else {
                 showError("Нужны разрешения для работы с файлами")
             }
+        }
+    }
+
+    private fun showProgressBar(show: Boolean) {
+        runOnUiThread {
+            if (show) {
+                binding.uploadProgressContainer.visibility = View.VISIBLE
+                binding.uploadProgressText.visibility = View.VISIBLE
+                binding.uploadProgressBar.visibility = View.VISIBLE
+            } else {
+                binding.uploadProgressContainer.visibility = View.GONE
+                binding.uploadProgressText.visibility = View.GONE
+                binding.uploadProgressBar.visibility = View.GONE
+                binding.uploadProgressBar.progress = 0
+                binding.uploadProgressText.text = ""
+            }
+        }
+    }
+
+    private fun updateProgress(percent: Int, bytesWritten: Long, totalBytes: Long) {
+        runOnUiThread {
+            binding.uploadProgressBar.progress = percent
+            val writtenMb = bytesWritten / (1024.0 * 1024.0)
+            val totalMb = totalBytes / (1024.0 * 1024.0)
+            binding.uploadProgressText.text = String.format(Locale.getDefault(),
+                "Загружено: %.2f / %.2f MB (%d%%)", writtenMb, totalMb, percent)
         }
     }
 

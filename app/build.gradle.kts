@@ -70,4 +70,10 @@ dependencies {
     // Для сканирования QR-кодов
     implementation("com.google.zxing:core:3.5.3")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // Для работы с потоками
+    implementation("com.squareup.okio:okio:3.9.0")
+
+    // Для увеличения лимитов памяти
+    implementation("androidx.multidex:multidex:2.0.1")
 }
