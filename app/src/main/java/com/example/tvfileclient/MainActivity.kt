@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -24,10 +25,7 @@ import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
-import okio.source
-import okio.buffer
 import java.io.InputStream
 import java.io.IOException
 import java.io.File
@@ -74,9 +72,9 @@ class MainActivity : AppCompatActivity() {
 
         client = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-//            .connectTimeout(2, TimeUnit.MINUTES)
-            .writeTimeout(10, TimeUnit.MINUTES) // Увеличиваем для больших файлов
-            .readTimeout(10, TimeUnit.MINUTES)
+            .writeTimeout(30, TimeUnit.MINUTES) // 30 минут на загрузку
+            .readTimeout(30, TimeUnit.MINUTES)
+            .retryOnConnectionFailure(false)
             .addInterceptor(logging)
             .build()
     }
@@ -150,7 +148,6 @@ class MainActivity : AppCompatActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
 
-        // Результат сканирования QR-кода
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (result != null) {
             if (result.contents != null) {
@@ -160,7 +157,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Результат выбора файла
         if (requestCode == PICK_FILE_REQUEST && resultCode == RESULT_OK) {
             data?.data?.let { uri ->
                 uploadFile(uri)
@@ -172,86 +168,66 @@ class MainActivity : AppCompatActivity() {
         showLoading(true)
         currentServerUrl = url
 
-        mainScope.launch {
-            try {
-                val request = Request.Builder()
-                    .url(url)
-                    .get()
-                    .build()
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
 
-                client.newCall(request).enqueue(object : Callback {
-                    override fun onFailure(call: Call, e: IOException) {
-                        mainScope.launch {
-                            showLoading(false)
-                            showError("Ошибка подключения: ${e.message}")
-                        }
-                    }
-
-                    override fun onResponse(call: Call, response: Response) {
-                        mainScope.launch {
-                            showLoading(false)
-                            if (response.isSuccessful) {
-                                saveServerUrl(url)
-                                showSuccess("Подключено к серверу")
-                                loadFileList(url)
-                            } else {
-                                showError("Ошибка сервера: ${response.code}")
-                            }
-                        }
-                    }
-                })
-            } catch (e: Exception) {
-                showLoading(false)
-                showError("Ошибка: ${e.message}")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread {
+                    showLoading(false)
+                    showError("Ошибка подключения: ${e.message}")
+                }
             }
-        }
+
+            override fun onResponse(call: Call, response: Response) {
+                runOnUiThread {
+                    showLoading(false)
+                    if (response.isSuccessful) {
+                        saveServerUrl(url)
+                        showSuccess("Подключено к серверу")
+                        loadFileList(url)
+                    } else {
+                        showError("Ошибка сервера: ${response.code}")
+                    }
+                }
+            }
+        })
     }
 
     private fun loadFileList(serverUrl: String) {
-        showLoading(true)
+        val request = Request.Builder()
+            .url(serverUrl)
+            .get()
+            .build()
 
-        mainScope.launch {
-            try {
-                val request = Request.Builder()
-                    .url(serverUrl)
-                    .get()
-                    .build()
-
-                client.newCall(request).enqueue(object : Callback {
-                    override fun onFailure(call: Call, e: IOException) {
-                        mainScope.launch {
-                            showLoading(false)
-                            binding.refreshLayout.isRefreshing = false
-                            showError("Ошибка загрузки списка файлов")
-                        }
-                    }
-
-                    override fun onResponse(call: Call, response: Response) {
-                        mainScope.launch {
-                            showLoading(false)
-                            binding.refreshLayout.isRefreshing = false
-
-                            if (response.isSuccessful) {
-                                val html = response.body?.string() ?: ""
-                                parseFileListFromHtml(html)
-                            } else {
-                                showError("Ошибка загрузки: ${response.code}")
-                            }
-                        }
-                    }
-                })
-            } catch (e: Exception) {
-                showLoading(false)
-                binding.refreshLayout.isRefreshing = false
-                showError("Ошибка: ${e.message}")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread {
+                    binding.refreshLayout.isRefreshing = false
+                    showError("Ошибка загрузки списка файлов")
+                }
             }
-        }
+
+            override fun onResponse(call: Call, response: Response) {
+                runOnUiThread {
+                    binding.refreshLayout.isRefreshing = false
+
+                    if (response.isSuccessful) {
+                        val html = response.body?.string() ?: ""
+                        parseFileListFromHtml(html)
+                    } else {
+                        showError("Ошибка загрузки: ${response.code}")
+                    }
+                }
+            }
+        })
     }
 
     private fun parseFileListFromHtml(html: String) {
         fileList.clear()
 
-        // Простой парсинг HTML для извлечения информации о файлах
         val filePattern = "<tr>.*?<td>(.*?)</td>.*?<td>(.*?)</td>.*?</tr>".toRegex(RegexOption.DOT_MATCHES_ALL)
         val matches = filePattern.findAll(html)
 
@@ -261,7 +237,6 @@ class MainActivity : AppCompatActivity() {
                 val fileName = groups[1].trim()
                 val fileSize = parseFileSize(groups[2].trim())
 
-                // Пропускаем заголовки таблицы
                 if (fileName != "Имя файла" && fileName.isNotEmpty()) {
                     fileList.add(RemoteFile(fileName, fileSize))
                 }
@@ -316,50 +291,36 @@ class MainActivity : AppCompatActivity() {
         showLoading(true)
         showProgressBar(true)
 
-        mainScope.launch(Dispatchers.IO) {
-            var inputStream: InputStream? = null
+        Thread {
             try {
-                // Получаем размер файла до открытия потока
                 val fileSize = getFileSize(uri)
                 val fileName = getFileName(uri)
 
-                if (fileSize == 0L) {
-                    withContext(Dispatchers.Main) {
-                        showError("Не удалось определить размер файла")
-                        showLoading(false)
-                        showProgressBar(false)
-                    }
-                    return@launch
-                }
+                Log.d("Upload", "Starting upload of $fileName, size: ${fileSize / (1024*1024)} MB")
 
-                // Создаем кастомный RequestBody, который сам управляет потоком
                 val requestBody = object : RequestBody() {
-                    override fun contentType(): MediaType? =
-                        "application/octet-stream".toMediaTypeOrNull()
-
+                    override fun contentType(): MediaType? = "application/octet-stream".toMediaTypeOrNull()
                     override fun contentLength(): Long = fileSize
 
                     override fun writeTo(sink: BufferedSink) {
-                        // Открываем поток ТОЛЬКО здесь и закрываем его после использования
-                        contentResolver.openInputStream(uri)?.use { stream ->
-                            val buffer = ByteArray(8192) // 8KB буфер
-                            var bytesRead: Int
-                            var total = 0L
+                        var total = 0L
+                        val buffer = ByteArray(8192)
 
+                        contentResolver.openInputStream(uri)?.use { stream ->
+                            var bytesRead: Int
                             while (stream.read(buffer).also { bytesRead = it } != -1) {
                                 sink.write(buffer, 0, bytesRead)
-                                sink.emit()
                                 total += bytesRead
 
                                 val percent = (total * 100 / fileSize).toInt()
                                 val currentTotal = total
 
-                                // Обновляем прогресс
                                 runOnUiThread {
                                     updateProgress(percent, currentTotal, fileSize)
                                 }
                             }
-                        } ?: throw IOException("Не удалось открыть файл")
+                            sink.flush()
+                        } ?: throw IOException("Cannot open input stream")
                     }
                 }
 
@@ -369,47 +330,45 @@ class MainActivity : AppCompatActivity() {
                     .addFormDataPart("filename", fileName)
                     .build()
 
+                val uploadClient = OkHttpClient.Builder()
+                    .connectTimeout(2, TimeUnit.MINUTES)
+                    .writeTimeout(30, TimeUnit.MINUTES)
+                    .readTimeout(5, TimeUnit.MINUTES)
+                    .retryOnConnectionFailure(true) // Включаем retry для надежности
+                    .build()
+
                 val request = Request.Builder()
                     .url(serverUrl)
                     .post(multipartBody)
-                    .build()
+                    .build() // Убрали header("Connection", "close")
 
-                client.newCall(request).enqueue(object : Callback {
-                    override fun onFailure(call: Call, e: IOException) {
-                        runOnUiThread {
-                            showLoading(false)
-                            showProgressBar(false)
-                            showError("Ошибка загрузки: ${e.message}")
-                        }
-                        e.printStackTrace()
+                val response = uploadClient.newCall(request).execute()
+
+                runOnUiThread {
+                    if (response.isSuccessful) {
+                        showSuccess("Файл успешно загружен")
+
+                        // Даем серверу время на освобождение ресурсов
+                        android.os.Handler(mainLooper).postDelayed({
+                            loadFileList(serverUrl)
+                        }, 2000) // Задержка 2 секунды
+
+                    } else {
+                        showError("Ошибка сервера: ${response.code}")
                     }
-
-                    override fun onResponse(call: Call, response: Response) {
-                        runOnUiThread {
-                            showLoading(false)
-                            showProgressBar(false)
-
-                            response.use {
-                                if (it.isSuccessful) {
-                                    showSuccess("Файл успешно загружен")
-                                    loadFileList(serverUrl)
-                                } else {
-                                    showError("Ошибка загрузки: ${it.code}")
-                                }
-                            }
-                        }
-                    }
-                })
+                    showLoading(false)
+                    showProgressBar(false)
+                }
 
             } catch (e: Exception) {
                 e.printStackTrace()
                 runOnUiThread {
+                    showError("Ошибка: ${e.message}")
                     showLoading(false)
                     showProgressBar(false)
-                    showError("Ошибка: ${e.message}")
                 }
             }
-        }
+        }.start()
     }
 
     private fun getFileName(uri: Uri): String {
@@ -461,8 +420,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun downloadFile(file: RemoteFile) {
         val serverUrl = currentServerUrl ?: return
-        val downloadUrl = "$serverUrl/download/${file.name}"
-
         Toast.makeText(this, "Скачивание пока не реализовано", Toast.LENGTH_SHORT).show()
     }
 
@@ -482,38 +439,31 @@ class MainActivity : AppCompatActivity() {
     private fun performDelete(serverUrl: String, fileName: String) {
         showLoading(true)
 
-        mainScope.launch {
-            try {
-                val request = Request.Builder()
-                    .url("$serverUrl/delete/$fileName")
-                    .get()
-                    .build()
+        val request = Request.Builder()
+            .url("$serverUrl/delete/$fileName")
+            .get()
+            .build()
 
-                client.newCall(request).enqueue(object : Callback {
-                    override fun onFailure(call: Call, e: IOException) {
-                        mainScope.launch {
-                            showLoading(false)
-                            showError("Ошибка удаления")
-                        }
-                    }
-
-                    override fun onResponse(call: Call, response: Response) {
-                        mainScope.launch {
-                            showLoading(false)
-                            if (response.isSuccessful) {
-                                showSuccess("Файл удален")
-                                loadFileList(serverUrl)
-                            } else {
-                                showError("Ошибка удаления")
-                            }
-                        }
-                    }
-                })
-            } catch (e: Exception) {
-                showLoading(false)
-                showError("Ошибка: ${e.message}")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread {
+                    showLoading(false)
+                    showError("Ошибка удаления")
+                }
             }
-        }
+
+            override fun onResponse(call: Call, response: Response) {
+                runOnUiThread {
+                    showLoading(false)
+                    if (response.isSuccessful) {
+                        showSuccess("Файл удален")
+                        loadFileList(serverUrl)
+                    } else {
+                        showError("Ошибка удаления")
+                    }
+                }
+            }
+        })
     }
 
     private fun saveServerUrl(url: String) {
@@ -575,59 +525,49 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showProgressBar(show: Boolean) {
-        runOnUiThread {
-            if (show) {
-                binding.uploadProgressContainer.visibility = View.VISIBLE
-                binding.uploadProgressText.visibility = View.VISIBLE
-                binding.uploadProgressBar.visibility = View.VISIBLE
-            } else {
-                binding.uploadProgressContainer.visibility = View.GONE
-                binding.uploadProgressText.visibility = View.GONE
-                binding.uploadProgressBar.visibility = View.GONE
-                binding.uploadProgressBar.progress = 0
-                binding.uploadProgressText.text = ""
-            }
+        if (show) {
+            binding.uploadProgressContainer.visibility = View.VISIBLE
+            binding.uploadProgressBar.visibility = View.VISIBLE
+            binding.uploadProgressText.visibility = View.VISIBLE
+        } else {
+            binding.uploadProgressContainer.visibility = View.GONE
+            binding.uploadProgressBar.visibility = View.GONE
+            binding.uploadProgressText.visibility = View.GONE
+            binding.uploadProgressBar.progress = 0
+            binding.uploadProgressText.text = ""
         }
     }
 
     private fun updateProgress(percent: Int, bytesWritten: Long, totalBytes: Long) {
-        runOnUiThread {
-            binding.uploadProgressBar.progress = percent
-            val writtenMb = bytesWritten / (1024.0 * 1024.0)
-            val totalMb = totalBytes / (1024.0 * 1024.0)
-            binding.uploadProgressText.text = String.format(Locale.getDefault(),
-                "Загружено: %.2f / %.2f MB (%d%%)", writtenMb, totalMb, percent)
-        }
+        binding.uploadProgressBar.progress = percent
+        val writtenMb = bytesWritten / (1024.0 * 1024.0)
+        val totalMb = totalBytes / (1024.0 * 1024.0)
+        binding.uploadProgressText.text = String.format(Locale.getDefault(),
+            "Загружено: %.2f / %.2f MB (%d%%)", writtenMb, totalMb, percent)
     }
 
     private fun showLoading(show: Boolean) {
-        runOnUiThread {
-            if (show) {
-                binding.progressBar.visibility = View.VISIBLE
-                binding.contentLayout.alpha = 0.5f
-            } else {
-                binding.progressBar.visibility = View.GONE
-                binding.contentLayout.alpha = 1f
-            }
+        if (show) {
+            binding.progressBar.visibility = View.VISIBLE
+            binding.contentLayout.alpha = 0.5f
+        } else {
+            binding.progressBar.visibility = View.GONE
+            binding.contentLayout.alpha = 1f
         }
     }
 
     private fun showError(message: String) {
-        runOnUiThread {
-            Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG)
-                .setBackgroundTint(ContextCompat.getColor(this, android.R.color.holo_red_dark))
-                .setTextColor(ContextCompat.getColor(this, android.R.color.white))
-                .show()
-        }
+        Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG)
+            .setBackgroundTint(ContextCompat.getColor(this, android.R.color.holo_red_dark))
+            .setTextColor(ContextCompat.getColor(this, android.R.color.white))
+            .show()
     }
 
     private fun showSuccess(message: String) {
-        runOnUiThread {
-            Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT)
-                .setBackgroundTint(ContextCompat.getColor(this, android.R.color.holo_green_dark))
-                .setTextColor(ContextCompat.getColor(this, android.R.color.white))
-                .show()
-        }
+        Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT)
+            .setBackgroundTint(ContextCompat.getColor(this, android.R.color.holo_green_dark))
+            .setTextColor(ContextCompat.getColor(this, android.R.color.white))
+            .show()
     }
 
     override fun onDestroy() {
